@@ -1,20 +1,21 @@
 # test_cbam_simple.py
 # 简单的CBAM模块测试，不使用pytest
 
+import os
+import sys
+
 import torch
 import torch.nn as nn
-import sys
-import os
 
 # 添加路径，确保能导入ultralytics模块
-sys.path.append('D:/deep_learning/ultralytics-8.3.163')
+sys.path.append("D:/deep_learning/ultralytics-8.3.163")
 
 
 class CBAM(nn.Module):
-    """CBAM注意力模块"""
+    """CBAM注意力模块."""
 
     def __init__(self, channels, reduction_ratio=16, kernel_size=7):
-        super(CBAM, self).__init__()
+        super().__init__()
         self.channel_attention = ChannelAttention(channels, reduction_ratio)
         self.spatial_attention = SpatialAttention(kernel_size)
 
@@ -27,17 +28,17 @@ class CBAM(nn.Module):
 
 
 class ChannelAttention(nn.Module):
-    """CBAM通道注意力模块"""
+    """CBAM通道注意力模块."""
 
     def __init__(self, in_channels, reduction_ratio=16):
-        super(ChannelAttention, self).__init__()
+        super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
 
         self.fc = nn.Sequential(
             nn.Conv2d(in_channels, in_channels // reduction_ratio, 1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // reduction_ratio, in_channels, 1, bias=False)
+            nn.Conv2d(in_channels // reduction_ratio, in_channels, 1, bias=False),
         )
         self.sigmoid = nn.Sigmoid()
 
@@ -49,11 +50,11 @@ class ChannelAttention(nn.Module):
 
 
 class SpatialAttention(nn.Module):
-    """CBAM空间注意力模块"""
+    """CBAM空间注意力模块."""
 
     def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        super().__init__()
+        assert kernel_size in (3, 7), "kernel size must be 3 or 7"
         padding = 3 if kernel_size == 7 else 1
 
         self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
@@ -68,7 +69,7 @@ class SpatialAttention(nn.Module):
 
 
 def test_cbam_module():
-    """测试CBAM模块的基本功能"""
+    """测试CBAM模块的基本功能."""
     print("=" * 50)
     print("测试CBAM注意力模块")
     print("=" * 50)
@@ -88,9 +89,9 @@ def test_cbam_module():
 
     # 测试3：验证形状一致性
     if x.shape == output.shape:
-        print(f"   ✓ 输入输出形状一致")
+        print("   ✓ 输入输出形状一致")
     else:
-        print(f"   ✗ 输入输出形状不一致!")
+        print("   ✗ 输入输出形状不一致!")
         return False
 
     # 测试4：验证参数数量
@@ -146,7 +147,7 @@ def test_cbam_module():
 
 
 def test_cbam_integration():
-    """测试CBAM在YOLO中的集成"""
+    """测试CBAM在YOLO中的集成."""
     print("\n\n" + "=" * 50)
     print("测试CBAM在模型中的集成")
     print("=" * 50)
@@ -154,6 +155,7 @@ def test_cbam_integration():
     try:
         # 尝试导入YOLO
         from ultralytics import YOLO
+
         print("✓ 成功导入ultralytics")
 
         # 测试YAML配置文件
@@ -163,17 +165,18 @@ def test_cbam_integration():
 
             # 尝试解析配置文件
             import yaml
-            with open(yaml_path, 'r', encoding='utf-8') as f:
+
+            with open(yaml_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
 
-            if 'backbone' in config and 'head' in config:
+            if "backbone" in config and "head" in config:
                 print("✓ YAML配置文件格式正确")
 
                 # 检查是否包含CBAM模块
                 has_cbam = False
-                for layer in config['backbone']:
+                for layer in config["backbone"]:
                     if isinstance(layer, list) and len(layer) > 2:
-                        if 'C2f_CBAM' in str(layer[2]):
+                        if "C2f_CBAM" in str(layer[2]):
                             has_cbam = True
                             break
 
@@ -194,7 +197,7 @@ def test_cbam_integration():
 
 
 def main():
-    """主函数"""
+    """主函数."""
     print("CBAM注意力模块测试")
     print("当前工作目录:", os.getcwd())
     print("Python版本:", sys.version)
