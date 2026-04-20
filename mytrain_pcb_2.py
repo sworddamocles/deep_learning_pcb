@@ -10,76 +10,77 @@ if __name__ == "__main__":
     # 加载模型
     model = YOLO(r"D:\deep_learning\ultralytics-8.3.163\yolo11_cbam_SimAM.yaml")
 
-    # 优化的训练参数
+    # 优化的训练参数（重点修复颜色过拟合）
     model.train(
         # ==================== 核心训练参数 ====================
         data=r"D:\deep_learning\ultralytics-8.3.163\dataset_split\data.yaml",
-        epochs=350,  # 基于您之前的300epochs，效果不错
-        imgsz=1024,  # 保持640，RTX 3050 4GB内存友好
+        epochs=500,
+        imgsz=1024,
         
         # ==================== 硬件适配参数 ====================
-        batch=4,  # 从8降低到4，避免OOM（Out of Memory）
-        workers=0,  # 从4降低到2，减少CPU负担
-        cache='ram',  # 使用RAM缓存，速度比disk快
+        batch=32,
+        workers=8,
+        cache='ram',
         
         # ==================== 优化器与学习率 ====================
-        optimizer="AdamW",  # 改为AdamW，对小目标检测更友好
-        lr0=0.001,  # 降低初始学习率，避免震荡
-        lrf=0.01,  # 最终学习率为初始的1%
+        optimizer="AdamW",
+        lr0=0.002,
+        lrf=0.01,
         momentum=0.937,
-        weight_decay=0.0001,  # 降低权重衰减
+        weight_decay=0.0005,  # 提高正则，缓解过拟合
+        nbs=64,  # 显式设置标称batch，稳定损失与正则缩放
         
         # ==================== 学习率调度 ====================
-        cos_lr=True,  # 启用余弦退火，提高收敛性
-        warmup_epochs=3,  # 减少预热epochs
+        cos_lr=True,
+        warmup_epochs=5,
         warmup_momentum=0.8,
-        warmup_bias_lr=0.1,
+        warmup_bias_lr=0.05,
         
         # ==================== 损失函数优化 ====================
-        box=5.0,  # 降低边界框损失权重
-        cls=1.0,  # 提高分类损失权重，解决spur/spurious_copper混淆
-        dfl=1.0,  # 保持DFL损失权重
+        box=5.0,
+        cls=1.0,
+        dfl=1.0,
         
         # ==================== PCB缺陷专属数据增强 ====================
+        # 关键思路：增大颜色扰动，让模型更多学习几何边缘和纹理，而不是固定色彩分布
         augment=True,
-        hsv_h=0.01,  # 轻微色调变化
-        hsv_s=0.5,  # 中度饱和度增强
-        hsv_v=0.3,  # 轻微明度变化
-        degrees=2.0,  # 减小旋转角度，PCB板通常水平放置
-        translate=0.05,  # 减小平移
-        scale=0.2,  # 减小缩放范围
+        hsv_h=0.06,  # 明显色相扰动
+        hsv_s=0.85,  # 强饱和度扰动
+        hsv_v=0.55,  # 强亮度扰动
+        bgr=0.20,  # 20%概率交换通道，抑制颜色依赖
+        degrees=2.0,
+        translate=0.05,
+        scale=0.2,
         shear=0.0,
         perspective=0.0,
-        flipud=0.0,  # 关闭上下翻转
-        fliplr=0.5,  # 保持左右翻转
-        mosaic=0.8,  # 降低mosaic强度
-        mixup=0.1,  # 启用少量mixup
-        
-        # ==================== 小目标检测优化 ====================
-        # copy_paste=0.1,  # 小目标复制粘贴增强
-        # erasing=0.1,  # 随机擦除
-        # crop_fraction=0.8,  # 裁剪保留比例
+        flipud=0.0,
+        fliplr=0.5,
+        mosaic=0.6,
+        mixup=0.05,
+        copy_paste=0.15,
+        cutmix=0.10,
+        copy_paste_mode="flip",
         
         # ==================== 训练控制策略 ====================
         device=device,
-        patience=30,  # 设置早停耐心值
-        close_mosaic=15,  # 最后15个epoch关闭mosaic
+        patience=80,
+        close_mosaic=20,
         
         # ==================== 验证与保存 ====================
         val=True,
         save=True,
-        save_period=20,  # 每20个epoch保存一次
-        save_json=True,  # 保存验证结果JSON
+        save_period=20,
+        save_json=True,
         
         # ==================== 项目管理 ====================
         project="runs/train",
-        name="yolo11_cbam_SimAM_optimized2_1024_2",  # 新实验名称
+        name="yolo11_cbam_SimAM_color_robust_1024",
         exist_ok=True,
         pretrained=True,
         resume=False,
         
         # ==================== 训练优化 ====================
-        amp=True,  # 保持混合精度训练
+        amp=True,
         overlap_mask=False,
         mask_ratio=4,
         dropout=0.0,
@@ -87,5 +88,5 @@ if __name__ == "__main__":
         # ==================== 输出与监控 ====================
         verbose=True,
         plots=True,
-        deterministic=True,  # 启用确定性训练
+        deterministic=True,
     )

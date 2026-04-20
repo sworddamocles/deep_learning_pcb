@@ -1575,6 +1575,38 @@ class RandomFlip:
         return labels
 
 
+class RandomGrayBinary:
+    """Randomly apply grayscale or binarization to reduce color dependency."""
+
+    def __init__(self, p_gray=0.2, p_binary=0.1, thresh_range=(90, 170)):
+        """Initialize grayscale/binary augmentation probabilities and threshold range."""
+        assert 0.0 <= p_gray <= 1.0, f"p_gray must be in [0, 1], got {p_gray}"
+        assert 0.0 <= p_binary <= 1.0, f"p_binary must be in [0, 1], got {p_binary}"
+        self.p_gray = p_gray
+        self.p_binary = p_binary
+        self.thresh_low = int(thresh_range[0])
+        self.thresh_high = int(thresh_range[1])
+
+    def __call__(self, labels):
+        """Apply grayscale and/or binarization in-place to labels['img']."""
+        img = labels["img"]
+        if img is None or img.ndim != 3 or img.shape[-1] != 3:
+            return labels
+
+        if random.random() < self.p_gray:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+        if random.random() < self.p_binary:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            thresh = random.randint(self.thresh_low, self.thresh_high)
+            _, bw = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
+            img = cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
+
+        labels["img"] = img
+        return labels
+
+
 class LetterBox:
     """
     Resize image and padding for detection, instance segmentation, pose.
@@ -2548,6 +2580,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
             Albumentations(p=1.0),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+            RandomGrayBinary(p_gray=0.2, p_binary=0.12, thresh_range=(90, 170)),
             RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
