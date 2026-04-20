@@ -185,6 +185,7 @@ my_cloud_run/
 !yolo11_cbam_SimAM.yaml
 !README.md
 !README.zh-CN.md
+!TEST_COLOR_OVERFIT_USAGE.md
 dataset_split/
 car/
 备份文件夹/
