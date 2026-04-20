@@ -2580,7 +2580,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
             Albumentations(p=1.0),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-            RandomGrayBinary(p_gray=0.2, p_binary=0.12, thresh_range=(90, 170)),
+            RandomGrayBinary(p_gray=0.35, p_binary=0.20, thresh_range=(70, 190)),
             RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
