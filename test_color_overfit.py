@@ -68,8 +68,115 @@ def apply_gray3(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
 
 
-def predict_detections(model: YOLO, img: np.ndarray, imgsz: int, conf: float, iou: float, device: str) -> Detections:
-    result = model.predict(source=img, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)[0]
+def get_class_name(names: Dict[int, str] | List[str] | None, class_id: int) -> str:
+    if names is None:
+        return str(class_id)
+    if isinstance(names, dict):
+        return str(names.get(class_id, class_id))
+    if 0 <= class_id < len(names):
+        return str(names[class_id])
+    return str(class_id)
+
+
+def add_label_header(img: np.ndarray, title: str, subtitle: str = "") -> np.ndarray:
+    header_h = 52 if subtitle else 36
+    canvas = np.full((img.shape[0] + header_h, img.shape[1], 3), 24, dtype=np.uint8)
+    canvas[:header_h] = (32, 32, 32)
+    cv2.putText(canvas, title, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 255, 255), 2, cv2.LINE_AA)
+    if subtitle:
+        cv2.putText(canvas, subtitle, (12, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (220, 220, 220), 1, cv2.LINE_AA)
+    canvas[header_h:] = img
+    return canvas
+
+
+def draw_detections(img: np.ndarray, dets: Detections, names: Dict[int, str] | List[str] | None, box_color: Tuple[int, int, int]) -> np.ndarray:
+    out = img.copy()
+    for xyxy, conf, cls in zip(dets.xyxy, dets.conf, dets.cls):
+        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+        x1 = max(0, min(x1, out.shape[1] - 1))
+        y1 = max(0, min(y1, out.shape[0] - 1))
+        x2 = max(0, min(x2, out.shape[1] - 1))
+        y2 = max(0, min(y2, out.shape[0] - 1))
+        label = f"{get_class_name(names, int(cls))} {float(conf):.2f}"
+        cv2.rectangle(out, (x1, y1), (x2, y2), box_color, 2)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        top = max(0, y1 - th - 8)
+        cv2.rectangle(out, (x1, top), (x1 + tw + 6, y1), box_color, -1)
+        cv2.putText(out, label, (x1 + 3, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return out
+
+
+def resize_keep_aspect(img: np.ndarray, target_height: int) -> np.ndarray:
+    scale = target_height / max(1, img.shape[0])
+    target_width = max(1, int(round(img.shape[1] * scale)))
+    return cv2.resize(img, (target_width, target_height), interpolation=cv2.INTER_AREA)
+
+
+def pad_to_width(img: np.ndarray, target_width: int, fill_value: int = 18) -> np.ndarray:
+    if img.shape[1] >= target_width:
+        return img
+    pad = np.full((img.shape[0], target_width - img.shape[1], 3), fill_value, dtype=np.uint8)
+    return np.hstack((img, pad))
+
+
+def build_batch_mosaic(
+    items: List[Dict[str, object]],
+    names: Dict[int, str] | List[str] | None,
+    out_path: Path,
+    target_height: int = 360,
+    gap: int = 16,
+) -> None:
+    rows: List[np.ndarray] = []
+    for item in items:
+        img_path = Path(item["image_path"])
+        base_img = draw_detections(
+            resize_keep_aspect(item["base_img"], target_height),
+            item["base_det"],
+            names,
+            (46, 204, 113),
+        )
+        compare_img = draw_detections(
+            resize_keep_aspect(item["compare_img"], target_height),
+            item["compare_det"],
+            names,
+            (231, 76, 60),
+        )
+
+        base_img = add_label_header(
+            base_img,
+            f"ORIGINAL | {img_path.name}",
+            f"detections: {len(item['base_det'].cls)}",
+        )
+        compare_img = add_label_header(
+            compare_img,
+            f"COMPARE | {item['compare_name']}",
+            f"score={item['compare_score']:.4f}  match={item['compare_match']:.4f}  conf={item['compare_conf']:.4f}  count={item['compare_count']:.4f}",
+        )
+
+        row_height = max(base_img.shape[0], compare_img.shape[0])
+        if base_img.shape[0] < row_height:
+            base_img = cv2.copyMakeBorder(base_img, 0, row_height - base_img.shape[0], 0, 0, cv2.BORDER_CONSTANT, value=(24, 24, 24))
+        if compare_img.shape[0] < row_height:
+            compare_img = cv2.copyMakeBorder(compare_img, 0, row_height - compare_img.shape[0], 0, 0, cv2.BORDER_CONSTANT, value=(24, 24, 24))
+
+        row = np.hstack((base_img, np.full((row_height, gap, 3), 24, dtype=np.uint8), compare_img))
+        rows.append(row)
+
+    if not rows:
+        return
+
+    max_width = max(row.shape[1] for row in rows)
+    padded_rows = [pad_to_width(row, max_width) for row in rows]
+    mosaic = padded_rows[0]
+    for row in padded_rows[1:]:
+        spacer = np.full((gap, max_width, 3), 24, dtype=np.uint8)
+        mosaic = np.vstack((mosaic, spacer, row))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), mosaic)
+
+
+def result_to_detections(result: object) -> Detections:
     if result.boxes is None or len(result.boxes) == 0:
         return Detections(
             xyxy=np.zeros((0, 4), dtype=np.float32),
@@ -81,6 +188,22 @@ def predict_detections(model: YOLO, img: np.ndarray, imgsz: int, conf: float, io
         conf=result.boxes.conf.detach().cpu().numpy().astype(np.float32),
         cls=result.boxes.cls.detach().cpu().numpy().astype(np.int32),
     )
+
+
+def predict_detections(model: YOLO, img: np.ndarray, imgsz: int, conf: float, iou: float, device: str) -> Detections:
+    return result_to_detections(model.predict(source=img, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)[0])
+
+
+def predict_detections_many(
+    model: YOLO,
+    imgs: List[np.ndarray],
+    imgsz: int,
+    conf: float,
+    iou: float,
+    device: str,
+) -> List[Detections]:
+    results = model.predict(source=imgs, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)
+    return [result_to_detections(result) for result in results]
 
 
 def iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
@@ -149,8 +272,21 @@ def main() -> None:
     parser.add_argument("--iou", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--max-images", type=int, default=300)
+    parser.add_argument("--batch-size", type=int, default=20, help="Number of images per output batch")
+    parser.add_argument(
+        "--compare-variant",
+        type=str,
+        default="worst",
+        help="Variant to show in the comparison panel, or 'worst' to use the lowest-scoring transform",
+    )
+    parser.add_argument("--viz-height", type=int, default=360, help="Visualization tile height for batch mosaics")
     parser.add_argument("--save-dir", type=str, default="runs/color_overfit_test")
     args = parser.parse_args()
+
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be greater than 0")
+    if args.viz_height <= 0:
+        raise ValueError("--viz-height must be greater than 0")
 
     images = list_images(args.source, args.max_images)
     if not images:
@@ -160,6 +296,7 @@ def main() -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
 
     model = YOLO(args.model)
+    class_names = getattr(model, "names", None)
 
     transforms: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
         "gray3": apply_gray3,
@@ -171,19 +308,57 @@ def main() -> None:
     }
 
     rows = []
+    batch_items: List[Dict[str, object]] = []
+    batch_index = 0
+
+    def flush_batch(items: List[Dict[str, object]], current_batch_index: int) -> None:
+        if not items:
+            return
+        batch_score = float(np.mean([float(item["compare_score"]) for item in items]))
+        batch_match = float(np.mean([float(item["compare_match"]) for item in items]))
+        batch_conf = float(np.mean([float(item["compare_conf"]) for item in items]))
+        batch_count = float(np.mean([float(item["compare_count"]) for item in items]))
+        mosaic_path = save_dir / f"color_overfit_batch_{current_batch_index:03d}.jpg"
+        build_batch_mosaic(items, class_names, mosaic_path, target_height=args.viz_height)
+        print(
+            f"Batch {current_batch_index:03d} done: images={len(items)} "
+            f"score={batch_score:.4f} match={batch_match:.4f} conf={batch_conf:.4f} count={batch_count:.4f}"
+        )
+        print(f"Batch mosaic: {mosaic_path}")
 
     for idx, img_path in enumerate(images, 1):
         img = cv2.imread(str(img_path))
         if img is None:
             continue
 
-        base = predict_detections(model, img, args.imgsz, args.conf, args.iou, args.device)
+        variant_items = list(transforms.items())
+        variant_images = [fn(img) for _, fn in variant_items]
+        predictions = predict_detections_many(
+            model,
+            [img, *variant_images],
+            args.imgsz,
+            args.conf,
+            args.iou,
+            args.device,
+        )
 
-        for name, fn in transforms.items():
-            img_variant = fn(img)
-            pred_var = predict_detections(model, img_variant, args.imgsz, args.conf, args.iou, args.device)
+        base = predictions[0]
+        variant_results: List[Dict[str, object]] = []
+
+        for (name, _), img_variant, pred_var in zip(variant_items, variant_images, predictions[1:]):
             match_r, conf_r, count_r, n_base, n_var = match_ratio(base, pred_var)
             score = robust_score(match_r, conf_r, count_r)
+            variant_results.append(
+                {
+                    "name": name,
+                    "img": img_variant,
+                    "pred": pred_var,
+                    "match_r": match_r,
+                    "conf_r": conf_r,
+                    "count_r": count_r,
+                    "score": score,
+                }
+            )
             rows.append(
                 {
                     "image": str(img_path),
@@ -197,8 +372,37 @@ def main() -> None:
                 }
             )
 
-        if idx % 20 == 0 or idx == len(images):
-            print(f"Processed {idx}/{len(images)} images")
+        if args.compare_variant == "worst":
+            compare_result = min(variant_results, key=lambda item: float(item["score"]))
+        else:
+            compare_result = next((item for item in variant_results if item["name"] == args.compare_variant), None)
+            if compare_result is None:
+                valid = ", ".join(["worst", *transforms.keys()])
+                raise ValueError(f"Unknown --compare-variant '{args.compare_variant}'. Valid options: {valid}")
+
+        batch_items.append(
+            {
+                "image_path": img_path,
+                "base_img": img,
+                "base_det": base,
+                "compare_name": compare_result["name"],
+                "compare_img": compare_result["img"],
+                "compare_det": compare_result["pred"],
+                "compare_score": compare_result["score"],
+                "compare_match": compare_result["match_r"],
+                "compare_conf": compare_result["conf_r"],
+                "compare_count": compare_result["count_r"],
+            }
+        )
+
+        if len(batch_items) >= args.batch_size:
+            batch_index += 1
+            flush_batch(batch_items, batch_index)
+            batch_items = []
+
+    if batch_items:
+        batch_index += 1
+        flush_batch(batch_items, batch_index)
 
     if not rows:
         raise RuntimeError("No valid predictions collected. Please check model/source/conf settings.")
