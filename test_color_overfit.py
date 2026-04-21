@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
@@ -119,61 +121,143 @@ def pad_to_width(img: np.ndarray, target_width: int, fill_value: int = 18) -> np
     return np.hstack((img, pad))
 
 
-def build_batch_mosaic(
-    items: List[Dict[str, object]],
+def fit_to_canvas(img: np.ndarray, target_width: int, target_height: int, fill_value: int = 24) -> np.ndarray:
+    src_h, src_w = img.shape[:2]
+    if src_h <= 0 or src_w <= 0:
+        return np.full((target_height, target_width, 3), fill_value, dtype=np.uint8)
+
+    scale = min(target_width / src_w, target_height / src_h)
+    new_w = max(1, int(round(src_w * scale)))
+    new_h = max(1, int(round(src_h * scale)))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    canvas = np.full((target_height, target_width, 3), fill_value, dtype=np.uint8)
+    off_x = (target_width - new_w) // 2
+    off_y = (target_height - new_h) // 2
+    canvas[off_y : off_y + new_h, off_x : off_x + new_w] = resized
+    return canvas
+
+
+def prepare_panel(
+    img: np.ndarray,
+    dets: Detections,
     names: Dict[int, str] | List[str] | None,
-    out_path: Path,
-    target_height: int = 360,
-    gap: int = 16,
-) -> None:
+    title: str,
+    subtitle: str,
+    box_color: Tuple[int, int, int],
+    tile_width: int,
+    tile_height: int,
+) -> np.ndarray:
+    panel = draw_detections(img, dets, names, box_color)
+    panel = add_label_header(panel, title, subtitle)
+    return fit_to_canvas(panel, tile_width, tile_height)
+
+
+def stack_grid(tiles: List[np.ndarray], columns: int | None = None, gap: int = 14, fill_value: int = 24) -> np.ndarray:
+    if not tiles:
+        raise ValueError("No tiles provided for grid composition")
+
+    if columns is None or columns <= 0:
+        columns = max(1, int(math.ceil(math.sqrt(len(tiles)))))
+
+    max_width = max(tile.shape[1] for tile in tiles)
+    max_height = max(tile.shape[0] for tile in tiles)
+    normalized = []
+    for tile in tiles:
+        padded = tile
+        if tile.shape[1] < max_width:
+            pad = np.full((tile.shape[0], max_width - tile.shape[1], 3), fill_value, dtype=np.uint8)
+            padded = np.hstack((padded, pad))
+        if padded.shape[0] < max_height:
+            pad = np.full((max_height - padded.shape[0], padded.shape[1], 3), fill_value, dtype=np.uint8)
+            padded = np.vstack((padded, pad))
+        normalized.append(padded)
+
     rows: List[np.ndarray] = []
-    for item in items:
-        img_path = Path(item["image_path"])
-        base_img = draw_detections(
-            resize_keep_aspect(item["base_img"], target_height),
-            item["base_det"],
-            names,
-            (46, 204, 113),
-        )
-        compare_img = draw_detections(
-            resize_keep_aspect(item["compare_img"], target_height),
-            item["compare_det"],
-            names,
-            (231, 76, 60),
-        )
-
-        base_img = add_label_header(
-            base_img,
-            f"ORIGINAL | {img_path.name}",
-            f"detections: {len(item['base_det'].cls)}",
-        )
-        compare_img = add_label_header(
-            compare_img,
-            f"COMPARE | {item['compare_name']}",
-            f"score={item['compare_score']:.4f}  match={item['compare_match']:.4f}  conf={item['compare_conf']:.4f}  count={item['compare_count']:.4f}",
-        )
-
-        row_height = max(base_img.shape[0], compare_img.shape[0])
-        if base_img.shape[0] < row_height:
-            base_img = cv2.copyMakeBorder(base_img, 0, row_height - base_img.shape[0], 0, 0, cv2.BORDER_CONSTANT, value=(24, 24, 24))
-        if compare_img.shape[0] < row_height:
-            compare_img = cv2.copyMakeBorder(compare_img, 0, row_height - compare_img.shape[0], 0, 0, cv2.BORDER_CONSTANT, value=(24, 24, 24))
-
-        row = np.hstack((base_img, np.full((row_height, gap, 3), 24, dtype=np.uint8), compare_img))
+    for start in range(0, len(normalized), columns):
+        row_tiles = normalized[start : start + columns]
+        if len(row_tiles) < columns:
+            blank = np.full((max_height, max_width, 3), fill_value, dtype=np.uint8)
+            row_tiles.extend([blank] * (columns - len(row_tiles)))
+        row = row_tiles[0]
+        for tile in row_tiles[1:]:
+            row = np.hstack((row, np.full((max_height, gap, 3), fill_value, dtype=np.uint8), tile))
         rows.append(row)
 
-    if not rows:
-        return
+    mosaic = rows[0]
+    for row in rows[1:]:
+        mosaic = np.vstack((mosaic, np.full((gap, mosaic.shape[1], 3), fill_value, dtype=np.uint8), row))
+    return mosaic
 
-    max_width = max(row.shape[1] for row in rows)
-    padded_rows = [pad_to_width(row, max_width) for row in rows]
-    mosaic = padded_rows[0]
-    for row in padded_rows[1:]:
-        spacer = np.full((gap, max_width, 3), 24, dtype=np.uint8)
-        mosaic = np.vstack((mosaic, spacer, row))
 
+def save_sample_contact_sheet(
+    record: Dict[str, object],
+    names: Dict[int, str] | List[str] | None,
+    out_path: Path,
+    tile_width: int = 440,
+    tile_height: int = 320,
+) -> None:
+    base_img = record["base_img"]
+    base_det = record["base_det"]
+    variant_results = record["variant_results"]
+
+    tiles: List[np.ndarray] = [
+        prepare_panel(
+            base_img,
+            base_det,
+            names,
+            f"ORIGINAL | {Path(record['image_path']).name}",
+            f"detections={len(base_det.cls)}  score={record['sample_score']:.4f}",
+            (46, 204, 113),
+            tile_width,
+            tile_height,
+        )
+    ]
+
+    for variant in variant_results:
+        tile = prepare_panel(
+            variant["img"],
+            variant["pred"],
+            names,
+            f"{variant['name'].upper()}",
+            f"score={variant['score']:.4f}  match={variant['match_r']:.4f}  conf={variant['conf_r']:.4f}  count={variant['count_r']:.4f}",
+            (231, 76, 60),
+            tile_width,
+            tile_height,
+        )
+        tiles.append(tile)
+
+    mosaic = stack_grid(tiles, columns=None, gap=14)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), mosaic)
+
+
+def select_batch_records(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    if not records:
+        return []
+
+    ordered = sorted(records, key=lambda item: float(item["sample_score"]), reverse=True)
+    selected: List[Dict[str, object]] = [ordered[0]]
+
+    if len(ordered) > 1:
+        selected.append(ordered[-1])
+
+    middle = ordered[1:-1]
+    if middle:
+        middle_count = max(1, int(round(len(middle) * 0.1)))
+        middle_count = min(middle_count, len(middle))
+        selected.extend(random.sample(middle, middle_count))
+
+    unique: List[Dict[str, object]] = []
+    seen_paths = set()
+    for record in selected:
+        key = str(record["image_path"])
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        unique.append(record)
+
+    return unique
 
 
 def result_to_detections(result: object) -> Detections:
@@ -273,13 +357,8 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--max-images", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=20, help="Number of images per output batch")
-    parser.add_argument(
-        "--compare-variant",
-        type=str,
-        default="worst",
-        help="Variant to show in the comparison panel, or 'worst' to use the lowest-scoring transform",
-    )
-    parser.add_argument("--viz-height", type=int, default=360, help="Visualization tile height for batch mosaics")
+    parser.add_argument("--viz-height", type=int, default=300, help="Visualization tile height for each panel")
+    parser.add_argument("--viz-width", type=int, default=440, help="Visualization tile width for each panel")
     parser.add_argument("--save-dir", type=str, default="runs/color_overfit_test")
     args = parser.parse_args()
 
@@ -287,6 +366,8 @@ def main() -> None:
         raise ValueError("--batch-size must be greater than 0")
     if args.viz_height <= 0:
         raise ValueError("--viz-height must be greater than 0")
+    if args.viz_width <= 0:
+        raise ValueError("--viz-width must be greater than 0")
 
     images = list_images(args.source, args.max_images)
     if not images:
@@ -308,101 +389,109 @@ def main() -> None:
     }
 
     rows = []
-    batch_items: List[Dict[str, object]] = []
     batch_index = 0
 
-    def flush_batch(items: List[Dict[str, object]], current_batch_index: int) -> None:
-        if not items:
-            return
-        batch_score = float(np.mean([float(item["compare_score"]) for item in items]))
-        batch_match = float(np.mean([float(item["compare_match"]) for item in items]))
-        batch_conf = float(np.mean([float(item["compare_conf"]) for item in items]))
-        batch_count = float(np.mean([float(item["compare_count"]) for item in items]))
-        mosaic_path = save_dir / f"color_overfit_batch_{current_batch_index:03d}.jpg"
-        build_batch_mosaic(items, class_names, mosaic_path, target_height=args.viz_height)
-        print(
-            f"Batch {current_batch_index:03d} done: images={len(items)} "
-            f"score={batch_score:.4f} match={batch_match:.4f} conf={batch_conf:.4f} count={batch_count:.4f}"
-        )
-        print(f"Batch mosaic: {mosaic_path}")
+    def process_batch(batch_images: List[Tuple[Path, np.ndarray]], current_batch_index: int) -> None:
+        batch_records: List[Dict[str, object]] = []
 
-    for idx, img_path in enumerate(images, 1):
-        img = cv2.imread(str(img_path))
-        if img is None:
-            continue
+        pending_images: List[np.ndarray] = []
+        pending_meta: List[Dict[str, object]] = []
+        for img_path, img in batch_images:
+            variant_items = list(transforms.items())
+            variant_images = [fn(img) for _, fn in variant_items]
+            pending_images.extend([img, *variant_images])
+            pending_meta.append({"image_path": img_path, "base_img": img, "variant_items": variant_items, "variant_images": variant_images})
 
-        variant_items = list(transforms.items())
-        variant_images = [fn(img) for _, fn in variant_items]
         predictions = predict_detections_many(
             model,
-            [img, *variant_images],
+            pending_images,
             args.imgsz,
             args.conf,
             args.iou,
             args.device,
         )
 
-        base = predictions[0]
-        variant_results: List[Dict[str, object]] = []
+        cursor = 0
+        for meta in pending_meta:
+            img_path = meta["image_path"]
+            base_img = meta["base_img"]
+            variant_items = meta["variant_items"]
+            variant_images = meta["variant_images"]
 
-        for (name, _), img_variant, pred_var in zip(variant_items, variant_images, predictions[1:]):
-            match_r, conf_r, count_r, n_base, n_var = match_ratio(base, pred_var)
-            score = robust_score(match_r, conf_r, count_r)
-            variant_results.append(
+            base = predictions[cursor]
+            cursor += 1
+
+            variant_results: List[Dict[str, object]] = []
+            for (name, _), img_variant in zip(variant_items, variant_images):
+                pred_var = predictions[cursor]
+                cursor += 1
+                match_r, conf_r, count_r, n_base, n_var = match_ratio(base, pred_var)
+                score = robust_score(match_r, conf_r, count_r)
+                variant_results.append(
+                    {
+                        "name": name,
+                        "img": img_variant,
+                        "pred": pred_var,
+                        "match_r": match_r,
+                        "conf_r": conf_r,
+                        "count_r": count_r,
+                        "score": score,
+                    }
+                )
+                rows.append(
+                    {
+                        "image": str(img_path),
+                        "variant": name,
+                        "base_det": n_base,
+                        "variant_det": n_var,
+                        "match_ratio": round(match_r, 6),
+                        "conf_ratio": round(conf_r, 6),
+                        "count_ratio": round(count_r, 6),
+                        "score": round(score, 6),
+                    }
+                )
+
+            sample_score = float(np.mean([float(item["score"]) for item in variant_results])) if variant_results else 0.0
+            batch_records.append(
                 {
-                    "name": name,
-                    "img": img_variant,
-                    "pred": pred_var,
-                    "match_r": match_r,
-                    "conf_r": conf_r,
-                    "count_r": count_r,
-                    "score": score,
+                    "image_path": img_path,
+                    "base_img": base_img,
+                    "base_det": base,
+                    "variant_results": variant_results,
+                    "sample_score": sample_score,
                 }
             )
-            rows.append(
-                {
-                    "image": str(img_path),
-                    "variant": name,
-                    "base_det": n_base,
-                    "variant_det": n_var,
-                    "match_ratio": round(match_r, 6),
-                    "conf_ratio": round(conf_r, 6),
-                    "count_ratio": round(count_r, 6),
-                    "score": round(score, 6),
-                }
-            )
 
-        if args.compare_variant == "worst":
-            compare_result = min(variant_results, key=lambda item: float(item["score"]))
-        else:
-            compare_result = next((item for item in variant_results if item["name"] == args.compare_variant), None)
-            if compare_result is None:
-                valid = ", ".join(["worst", *transforms.keys()])
-                raise ValueError(f"Unknown --compare-variant '{args.compare_variant}'. Valid options: {valid}")
+        selected_records = select_batch_records(batch_records)
+        saved_paths: List[Path] = []
+        for rank, record in enumerate(selected_records, 1):
+            img_name = Path(record["image_path"]).stem
+            out_path = save_dir / f"color_overfit_batch_{current_batch_index:03d}_sample_{rank:02d}_{img_name}.jpg"
+            save_sample_contact_sheet(record, class_names, out_path, tile_width=args.viz_width, tile_height=args.viz_height)
+            saved_paths.append(out_path)
 
-        batch_items.append(
-            {
-                "image_path": img_path,
-                "base_img": img,
-                "base_det": base,
-                "compare_name": compare_result["name"],
-                "compare_img": compare_result["img"],
-                "compare_det": compare_result["pred"],
-                "compare_score": compare_result["score"],
-                "compare_match": compare_result["match_r"],
-                "compare_conf": compare_result["conf_r"],
-                "compare_count": compare_result["count_r"],
-            }
+        batch_scores = [float(item["sample_score"]) for item in batch_records]
+        print(
+            f"Batch {current_batch_index:03d} done: images={len(batch_records)} "
+            f"score_mean={float(np.mean(batch_scores)):.4f} selected={len(selected_records)}"
         )
+        for out_path in saved_paths:
+            print(f"Saved: {out_path}")
 
-        if len(batch_items) >= args.batch_size:
+    batch_buffer: List[Tuple[Path, np.ndarray]] = []
+    for img_path in images:
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+        batch_buffer.append((img_path, img))
+        if len(batch_buffer) >= args.batch_size:
             batch_index += 1
-            flush_batch(batch_items, batch_index)
-            batch_items = []
+            process_batch(batch_buffer, batch_index)
+            batch_buffer = []
 
-    if batch_items:
+    if batch_buffer:
         batch_index += 1
-        flush_batch(batch_items, batch_index)
+        process_batch(batch_buffer, batch_index)
 
     if not rows:
         raise RuntimeError("No valid predictions collected. Please check model/source/conf settings.")
